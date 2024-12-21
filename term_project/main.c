@@ -371,6 +371,8 @@ void stop_laser(void) {
 // 메뉴에서 레이저 제어 옵션 추가
 void process_menu_input(char input) {
     switch(input) {
+        case '1': //  먹이 주기
+            break;'
         case '2':  // 1번 입력: 레이저 켜기
             start_laser();
             send_msg_to_bluetooth("Laser ON\n");
@@ -417,7 +419,7 @@ void delay() {
 
 int main(void)
 {
-    char msg[] = "\r\nWelcome to the cat feed system:\r\n1. Feed \r\n2. Start Laser\r\n3. Stop Laser \r\n4. Print Status\r\nPlease choose an option by entering the number.\r\n";
+    char msg[] = "\r\nWelcome to the cat feed system:\r\n1. Feed \r\n2. Start Laser\r\n3. Stop Laser \r\nPlease choose an option by entering the number.\r\n";
     
     SystemInit();
     RCC_Configure();
