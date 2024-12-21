@@ -11,36 +11,69 @@
 void RCC_Configure(void); //RCC 설정
 void GPIO_Configure(void); //GPIO 설정
 void NVIC_Configure(void); //NVIC 설정
+
 // ADC 관련
 void ADC_Configure(void); 
 void ADC1_2_IRQHandler(void);
 void DMA_Configure(void); //DMA 설정
+
 //모터관련
 void TIM_Configure(void);
 void moveMotor(uint16_t pulse);
 void moveLasor(uint16_t pulse);
+
+// 진동센서
+void read_vibration_sensor(void);
+
+// 초음파 감지 센서
+void check_for_object(void);
+
+// 온습도 센서
+void read_temperature_humidity(void);
+
 // bluetooth 관련
 void USART1_Init(void); //USART1(putty) 설정 
 void USART2_Init(void);  //USART2(bluetooth) 설정
 void send_msg_to_bluetooth(char* buf); //USART1(putty)로 문자열 보냄
 void send_msg_to_putty(char* buf); // USART2(bluetooth)로 문자열 보냄
+
 // 메인함수 관련
 void delay(); //딜레이
 void feed();
-void start_laser();
 
 int feed_activate = 0;
 int lasor_activate = 0;
-volatile uint32_t ADC_Value[2];// 진동 센서, 온습도 값 저장
+
 // timer counter
 volatile uint8_t servo_state = 0; // 0: 90도, 1: 180도
 volatile uint32_t timer_count = 0; // 2초 대기 카운터
 volatile uint32_t lasor_count = 0; // 10초 레이저 카운터
-#define VIBRATION_THRESHOLD 1000 // 진동 센서 값의 임계값
+
 // 서보모터 PWM 값 정의
 #define SERVO_MIN_ANGLE 500   // 0도일 때의 PWM 신호 (us)
 #define SERVO_MAX_ANGLE 2000  // 180도일 때의 PWM 신호 (us)
 #define SERVO_MID_ANGLE 1500  // 90도일 때의 PWM 신호 (us)
+
+// 레이저
+void start_laser(void); // 레이저 켜는 함수
+
+// 메뉴 처리
+void process_menu_input(char input);
+
+int bluetooth_connected = 0;
+int menu_printed = 0;
+volatile uint32_t ADC_Value[2];// 진동 센서, 온습도 값 저장
+
+// 진동 센서
+#define VIBRATION_THRESHOLD 2885 // 진동 센서 값의 임계값
+
+// 초음파 감지 센서
+#define SOUND_SPEED 343.0 // 속도 (m/s)
+
+// 온습도 센서 관련 값 (ADC 값에서 변환)
+#define ADC_MAX_VALUE 4095.0
+#define TEMP_SENSOR_CALIBRATION 3.3 // 센서의 보정값, 실제 센서에 따라 달라질 수 있음
+#define TEMP_SENSOR_RESOLUTION 0.01 // 온도 변화에 대한 해상도
 
 void RCC_Configure(void)
 {  
@@ -103,7 +136,8 @@ void GPIO_Configure(void)
         
         
         // ADC  pc0, pc1
-        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0 | GPIO_Pin_1;
+        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0 | GPIO_Pin_1;  // 진동, 온습도
+        // Set Pin Mode General Output Push-Pull
         GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AIN;
         GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
         GPIO_Init(GPIOC, &GPIO_InitStructure);
@@ -113,7 +147,7 @@ void GPIO_Configure(void)
         GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU | GPIO_Mode_IPD;
         GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
         GPIO_Init(GPIOD, &GPIO_InitStructure);
-        
+
         //pwm feeding motor
         GPIO_InitTypeDef GPIO_InitStructure2;   // TIM3 채널 3 핀
         GPIO_InitStructure2.GPIO_Pin = GPIO_Pin_0;
@@ -126,6 +160,18 @@ void GPIO_Configure(void)
         GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP; // 대체 기능 출력
         GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
         GPIO_Init(GPIOA, &GPIO_InitStructure);
+
+        // 초음파 감지 센서
+        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_4; // PA4
+        GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+        GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU | GPIO_Mode_IPD;
+        GPIO_Init(GPIOA, &GPIO_InitStructure);
+        
+         // 레이저 제어 핀(PD3)을 출력 모드로 설정
+        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_3; // PD3 (레이저 제어 핀)
+        GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+        GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP; // 출력 모드 (Push-pull)
+        GPIO_Init(GPIOD, &GPIO_InitStructure);
 }
 
 void ADC_Configure(void) {
@@ -142,6 +188,7 @@ void ADC_Configure(void) {
     ADC_Init(ADC1, &ADC);
     ADC_RegularChannelConfig(ADC1, ADC_Channel_10, 1, ADC_SampleTime_239Cycles5);  //진동
     ADC_RegularChannelConfig(ADC1, ADC_Channel_11, 2, ADC_SampleTime_239Cycles5);  //온습도
+
     ADC_Cmd(ADC1, ENABLE);  // ADC1 enable
     ADC_DMACmd(ADC1,ENABLE);
     
@@ -326,7 +373,55 @@ void USART2_IRQHandler() { // phone -> putty
         // clear 'Read data register not empty' flag
     	USART_ClearITPendingBit(USART2,USART_IT_RXNE);
     }
+}
+
+// 진동 센서 값을 읽고 블루투스로 전송
+void read_vibration_sensor(void) {
+    uint32_t vibration_value = ADC_Value[0];  // 진동 센서의 값이 첫 번째 채널에 저장됨
+  
+    
+    if (vibration_value < VIBRATION_THRESHOLD) {
+        char vibration_msg[50];
+        sprintf(vibration_msg, "\r\nVibration Detected! ADC Value: %d\r\n", vibration_value);
+        send_msg_to_putty(vibration_msg); // 푸티로 메시지 전송
+        send_msg_to_bluetooth(vibration_msg);  // 진동 감지 시 핸드폰에 메시지 전송
+    }
+}
+
+
+// 초음파 감지 센서 (물체 감지)
+void check_for_object(void)
+{
+    // Echo 핀 상태 변화를 감지하여 물체를 감지
+    if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_4) == SET) {  // Echo 핀 HIGH로 변하면
+        char msg[] = "Object detected! Close proximity.";
+        send_msg_to_bluetooth(msg);  // 블루투스로 전송
+        send_msg_to_putty(msg);      // 푸티로 전송
         
+        read_temperature_humidity();  // 온습도 센서 값 읽기
+    }
+}
+
+// 온습도 센서 값을 읽고 변환하여 출력
+void read_temperature_humidity(void) {
+    // 가상의 코드로, 실제 온도/습도 센서에 맞게 수정 필요.
+    float temp = (ADC_Value[1] / ADC_MAX_VALUE) * 3.3 * 100;  // 온도 계산 (예: 간단한 ADC 변환)
+    float humidity = (ADC_Value[1] / ADC_MAX_VALUE) * 3.3 * 100;  // 습도 계산
+    char buf[50];
+    sprintf(buf, "\r\nTemperature: %.2f C, Humidity: %.2f %%\r\n", temp, humidity);
+    send_msg_to_bluetooth(buf);
+    send_msg_to_putty(buf);
+}
+
+
+// 레이저 켜는 함수
+void start_laser(void) {
+    GPIO_SetBits(GPIOD, GPIO_Pin_3); // PD3 핀에 HIGH 신호를 주어 레이저를 켬
+}
+
+// 레이저 끄는 함수
+void stop_laser(void) {
+    GPIO_ResetBits(GPIOD, GPIO_Pin_3); // PD3 핀에 LOW 신호를 주어 레이저를 끔
 }
 void TIM2_IRQHandler(void) { //todo
     
@@ -361,8 +456,40 @@ void TIM2_IRQHandler(void) { //todo
         }
       }
         
+      TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
+    }
+}
 
-        TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
+
+// 메뉴에서 레이저 제어 옵션 추가
+void process_menu_input(char input) {
+    switch(input) {
+        case '1': //  먹이 주기
+            break;
+        case '2':  // 1번 입력: 레이저 켜기
+            start_laser();
+            send_msg_to_bluetooth("Laser ON\n");
+            send_msg_to_putty("Laser ON\n");
+            break;
+        case '3':  // 2번 입력: 레이저 끄기
+            stop_laser();
+            send_msg_to_bluetooth("Laser OFF\n");
+            send_msg_to_putty("Laser OFF\n");
+            break;
+        default:
+            send_msg_to_bluetooth("Invalid option.\n");
+            send_msg_to_putty("Invalid option.\n");
+            break;
+    }
+}
+
+// 인자의 문자열을 블루투스로 전송
+void send_msg_to_bluetooth(char* buf){
+    for (int i=0;; i++) {
+        if (buf[i] == '\0')             // 문자열의 끝이라면 무한 반복 종료
+            break;
+        USART_SendData(USART2, buf[i]); // 한글자씩 전송
+        for(int k=0;k<50000;++k);       // 전송 후 조금 대기
     }
 }
 
@@ -396,22 +523,29 @@ void start_lasor(){
   delay();
 }
 
+
+
 void delay() {
     for (int i=0; i<1000000; i++);
 }
 
 int main(void)
 {
+    char msg[] = "\r\nWelcome to the cat feed system:\r\n1. Feed \r\n2. Start Laser\r\n3. Stop Laser \r\nPlease choose an option by entering the number.\r\n";
     SystemInit();
     RCC_Configure();
     GPIO_Configure();
     NVIC_Configure();
+
     TIM_Configure();
     USART1_Init();      // pc
-     USART2_Init();      // bluetooth
-   // ADC_Configure();
-  //  DMA_Configure();
+    USART2_Init();      // bluetooth
+
+    ADC_Configure();
+    DMA_Configure();
     
+    char received_input;
+
    // moveServoToAngle(SERVO_MID_ANGLE);
     while (1) { 
    
@@ -422,7 +556,35 @@ int main(void)
       lazor();
       delay();
       
+
+      if(GPIO_ReadInputDataBit(GPIOD, GPIO_Pin_2) != 0x00 && !menu_printed){
+        send_msg_to_bluetooth(msg);
+        menu_printed = 1;
+      }
       
+      /* 메뉴 출력 부분 이렇게 수정해본다면?
+      if (USART_GetFlagStatus(USART2, USART_FLAG_RXNE) == SET && !menu_printed){
+        send_msg_to_bluetooth(msg);
+        menu_printed = 1;
+      }
+      */
+      
+      // 메뉴에서 사용자 입력 받기 (USART2에서 입력 받기)
+        if (USART_GetFlagStatus(USART2, USART_FLAG_RXNE) == SET) {
+            received_input = USART_ReceiveData(USART2);  // 블루투스로 입력받은 값
+            process_menu_input(received_input);  // 메뉴 처리 함수 호출
+        }
+      
+     // 진동 센서 값 읽기
+      read_vibration_sensor();
+      
+      // 초음파 센서로 물체 감지
+      check_for_object();
+      
+
+      
+      delay();
+
      
     }
 
