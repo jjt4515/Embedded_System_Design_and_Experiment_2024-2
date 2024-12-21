@@ -11,6 +11,7 @@
 void RCC_Configure(void); //RCC 설정
 void GPIO_Configure(void); //GPIO 설정
 void NVIC_Configure(void); //NVIC 설정
+
 // ADC 관련
 void ADC_Configure(void); 
 void ADC1_2_IRQHandler(void);
@@ -23,7 +24,7 @@ void read_vibration_sensor(void);
 void check_for_object(void);
 
 // 온습도 센서
-void read_temperature_humidity(void)
+void read_temperature_humidity(void);
 
 // bluetooth 관련
 void USART1_Init(void); //USART1(putty) 설정 
@@ -38,28 +39,14 @@ void stop_laser(void);  // 레이저 끄는 함수
 // 메뉴 처리
 void process_menu_input(char input);
 
-
 void delay(); //딜레이
-
-// 거리 센서 작동시 온습도 센서 값 읽도록 구현
-
-/*
-void feed();
-void print_status();
-
-char usart1_msg[50]; // usart1(putty)에서 메시지를 받을 때 메세지를 저장할 버퍼이다.
-char usart2_msg[50]; // usart2(bluetooth)에서 메시지를 받을 때 메시지를 저장할 버퍼이다.
-int usart1_index = 0;//usart1_msg 버퍼에 다음으로 문자가 들어갈 인덱스이다.
-int usart2_index = 0;//usart2_msg 버퍼에 다음으로 문자가 들어갈 인덱스이다.
-*/
 
 int bluetooth_connected = 0;
 int menu_printed = 0;
-int print_vibration = 0;
 volatile uint32_t ADC_Value[2];// 진동 센서, 온습도 값 저장
 
 // 진동 센서
-#define VIBRATION_THRESHOLD 1000 // 진동 센서 값의 임계값
+#define VIBRATION_THRESHOLD 2885 // 진동 센서 값의 임계값
 
 // 초음파 감지 센서
 #define SOUND_SPEED 343.0 // 속도 (m/s)
@@ -128,7 +115,7 @@ void GPIO_Configure(void)
         
         
         // ADC  pc0, pc1
-        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0 | GPIO_Pin_1;
+        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0 | GPIO_Pin_1;  // 진동, 온습도
         // Set Pin Mode General Output Push-Pull
         GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AIN;
         // Set Pin Speed Max : 50MHz
@@ -145,7 +132,7 @@ void GPIO_Configure(void)
         // 초음파 감지 센서
         GPIO_InitStructure.GPIO_Pin = GPIO_Pin_4; // PA4
         GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
-        GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP; // 출력 모드 (Push-pull)
+        GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU | GPIO_Mode_IPD;
         GPIO_Init(GPIOA, &GPIO_InitStructure);
         
         
@@ -317,17 +304,13 @@ void USART2_IRQHandler() { // phone -> putty
 // 진동 센서 값을 읽고 블루투스로 전송
 void read_vibration_sensor(void) {
     uint32_t vibration_value = ADC_Value[0];  // 진동 센서의 값이 첫 번째 채널에 저장됨
-   
-    if (vibration_value < VIBRATION_THRESHOLD && print_vibration == 0) {
+  
+    
+    if (vibration_value < VIBRATION_THRESHOLD) {
         char vibration_msg[50];
         sprintf(vibration_msg, "\r\nVibration Detected! ADC Value: %d\r\n", vibration_value);
         send_msg_to_putty(vibration_msg); // 푸티로 메시지 전송
         send_msg_to_bluetooth(vibration_msg);  // 진동 감지 시 핸드폰에 메시지 전송
-        print_vibration = 1;
-    }
-    
-    if (vibration_value > VIBRATION_THRESHOLD  && print_vibration == 1) {
-      print_vibration = 0;
     }
 }
 
@@ -347,15 +330,15 @@ void check_for_object(void)
 
 // 온습도 센서 값을 읽고 변환하여 출력
 void read_temperature_humidity(void) {
-    uint32_t adc_value = ADC_Value[1];  // 온습도 센서의 값이 두 번째 채널에 저장됨
-    float voltage = (adc_value / ADC_MAX_VALUE) * TEMP_SENSOR_CALIBRATION;
-    float temperature = voltage / TEMP_SENSOR_RESOLUTION;  // 센서에서 읽은 값에 따른 온도 계산 (보정 필요)
-
-    char temp_msg[50];
-    sprintf(temp_msg, "\r\nTemperature: %.2f°C\r\n", temperature);
-    send_msg_to_putty(temp_msg);   // 푸티로 메시지 전송
-    send_msg_to_bluetooth(temp_msg); // 블루투스로 메시지 전송
+    // 가상의 코드로, 실제 온도/습도 센서에 맞게 수정 필요.
+    float temp = (ADC_Value[1] / ADC_MAX_VALUE) * 3.3 * 100;  // 온도 계산 (예: 간단한 ADC 변환)
+    float humidity = (ADC_Value[1] / ADC_MAX_VALUE) * 3.3 * 100;  // 습도 계산
+    char buf[50];
+    sprintf(buf, "\r\nTemperature: %.2f C, Humidity: %.2f %%\r\n", temp, humidity);
+    send_msg_to_bluetooth(buf);
+    send_msg_to_putty(buf);
 }
+
 
 // 레이저 켜는 함수
 void start_laser(void) {
@@ -372,7 +355,7 @@ void stop_laser(void) {
 void process_menu_input(char input) {
     switch(input) {
         case '1': //  먹이 주기
-            break;'
+            break;
         case '2':  // 1번 입력: 레이저 켜기
             start_laser();
             send_msg_to_bluetooth("Laser ON\n");
@@ -457,6 +440,7 @@ int main(void)
       
       // 초음파 센서로 물체 감지
       check_for_object();
+      
 
       
       delay();
