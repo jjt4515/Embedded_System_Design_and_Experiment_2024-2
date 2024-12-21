@@ -4,7 +4,7 @@
 #include "stm32f10x_usart.h"
 #include "stm32f10x_rcc.h"
 #include "stm32f10x_adc.h"
-
+#include "stdio.h"
 #include "misc.h"
 
 /* function prototype */
@@ -15,8 +15,12 @@ void NVIC_Configure(void); //NVIC 설정
 void ADC_Configure(void); 
 void ADC1_2_IRQHandler(void);
 void DMA_Configure(void); //DMA 설정
-
-
+//모터관련
+void TIM_Configure(void);
+void moveMotor(void);
+void moveServoToAngle(uint16_t pulse);
+// 진동센서
+void read_vibration_sensor(void);
 
 // bluetooth 관련
 void USART1_Init(void); //USART1(putty) 설정 
@@ -25,6 +29,8 @@ void send_msg_to_bluetooth(char* buf); //USART1(putty)로 문자열 보냄
 void send_msg_to_putty(char* buf); // USART2(bluetooth)로 문자열 보냄
 
 void delay(); //딜레이
+
+// 거리 센서 작동시 온습도 센서 값 읽도록 구현
 
 /*
 void feed();
@@ -37,9 +43,20 @@ char usart2_msg[50]; // usart2(bluetooth)에서 메시지를 받을 때 메시�
 int usart1_index = 0;//usart1_msg 버퍼에 다음으로 문자가 들어갈 인덱스이다.
 int usart2_index = 0;//usart2_msg 버퍼에 다음으로 문자가 들어갈 인덱스이다.
 */
+
 int bluetooth_connected = 0;
 int menu_printed = 0;
-volatile uint32_t ADC_Value[2];
+int print_vibration = 0;
+volatile uint32_t ADC_Value[2];// 진동 센서, 온습도 값 저장
+// timer counter
+volatile uint8_t servo_state = 0; // 0: 90도, 1: 180도
+volatile uint32_t timer_count = 0; // 2초 대기 카운터
+#define VIBRATION_THRESHOLD 1000 // 진동 센서 값의 임계값
+// 서보모터 PWM 값 정의
+#define SERVO_MIN_ANGLE 500   // 0도일 때의 PWM 신호 (us)
+#define SERVO_MAX_ANGLE 2500  // 180도일 때의 PWM 신호 (us)
+#define SERVO_MID_ANGLE 1500  // 90도일 때의 PWM 신호 (us)
+
 void RCC_Configure(void)
 {  
     // TODO: Enable the APB2 peripheral clock using the function 'RCC_APB2PeriphClockCmd'
@@ -50,7 +67,10 @@ void RCC_Configure(void)
 	/* USART1, USART2 clock enable */
         RCC_APB2PeriphClockCmd(RCC_APB2Periph_USART1, ENABLE);
         RCC_APB1PeriphClockCmd(RCC_APB1Periph_USART2, ENABLE);
-		
+	/* PWM */
+        RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2, ENABLE); // TIM2
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE); // Port B
+        RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM3, ENABLE); // TIM3	
 	/* Alternate Function IO clock enable */
         RCC_APB2PeriphClockCmd(RCC_APB2Periph_AFIO, ENABLE);
         
@@ -97,8 +117,8 @@ void GPIO_Configure(void)
         GPIO_Init(GPIOA, &GPIO_InitStructure);
         
         
-        // ADC  pc0, pc1, pc2
-        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0 | GPIO_Pin_1 | GPIO_Pin_2;
+        // ADC  pc0, pc1
+        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0 | GPIO_Pin_1;
         // Set Pin Mode General Output Push-Pull
         GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AIN;
         // Set Pin Speed Max : 50MHz
@@ -111,6 +131,13 @@ void GPIO_Configure(void)
         // Set Pin Speed Max : 50MHz
         GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
         GPIO_Init(GPIOD, &GPIO_InitStructure);
+        
+        //pwm motor
+        GPIO_InitTypeDef GPIO_InitStructure2;
+        GPIO_InitStructure2.GPIO_Pin = GPIO_Pin_0;
+        GPIO_InitStructure2.GPIO_Speed = GPIO_Speed_50MHz;
+        GPIO_InitStructure2.GPIO_Mode = GPIO_Mode_AF_PP;
+        GPIO_Init(GPIOB, &GPIO_InitStructure2);
 }
 
 void ADC_Configure(void) {
@@ -121,13 +148,12 @@ void ADC_Configure(void) {
     ADC.ADC_ContinuousConvMode = ENABLE;
     ADC.ADC_DataAlign = ADC_DataAlign_Right;
     ADC.ADC_ExternalTrigConv = ADC_ExternalTrigConv_None;
-    ADC.ADC_NbrOfChannel = 3;
+    ADC.ADC_NbrOfChannel = 2;
     ADC.ADC_ScanConvMode = ENABLE;
     
     ADC_Init(ADC1, &ADC);
     ADC_RegularChannelConfig(ADC1, ADC_Channel_10, 1, ADC_SampleTime_239Cycles5);  //진동
     ADC_RegularChannelConfig(ADC1, ADC_Channel_11, 2, ADC_SampleTime_239Cycles5);  //온습도
-    ADC_RegularChannelConfig(ADC1, ADC_Channel_12, 3, ADC_SampleTime_239Cycles5);  //거리
    // ADC_ITConfig(ADC1,  ADC_IT_EOC, ENABLE );  // interrupt enable
     ADC_Cmd(ADC1, ENABLE);  // ADC1 enable
     ADC_DMACmd(ADC1,ENABLE);
@@ -166,6 +192,7 @@ void DMA_Configure(void) {
 
 	DMA_Cmd(DMA1_Channel1, ENABLE);
 }
+
 
 void USART1_Init(void)
 {
@@ -207,7 +234,45 @@ void USART2_Init(void)
 	USART_ITConfig(USART2, USART_IT_RXNE, ENABLE); // Receive Data register not empty interrupt
 	
 }
-
+void TIM_Configure(void)
+{
+    
+    TIM_TimeBaseInitTypeDef TIM2_InitStructure;
+    // TIM2 설정: 1ms 주기로 인터럽트 발생
+    
+    TIM2_InitStructure.TIM_Period = 1000 - 1; // 1ms 주기
+    TIM2_InitStructure.TIM_Prescaler = (SystemCoreClock / 1000) - 1; // 1kHz
+    TIM2_InitStructure.TIM_ClockDivision = 0;
+    TIM2_InitStructure.TIM_CounterMode = TIM_CounterMode_Up;
+    
+    TIM_TimeBaseInit(TIM2, &TIM2_InitStructure);
+    //TIM_ARRPreloadConfig(TIM2, ENABLE);
+    TIM_Cmd(TIM2, ENABLE);
+    TIM_ITConfig(TIM2, TIM_IT_Update, ENABLE);
+    
+    // motor pwm timer
+    TIM_TimeBaseInitTypeDef TIM3_InitStructure;
+    TIM_OCInitTypeDef TIM_OCInitStructure;
+    
+    uint16_t prescale = (uint16_t) (SystemCoreClock / 1000000) - 1;
+    
+    TIM3_InitStructure.TIM_Period = 20000 - 1;//todo
+    TIM3_InitStructure.TIM_Prescaler = prescale;
+    TIM3_InitStructure.TIM_ClockDivision = 0;
+    TIM3_InitStructure.TIM_CounterMode = TIM_CounterMode_Down;
+    
+    TIM_OCInitStructure.TIM_OCMode = TIM_OCMode_PWM1;
+    TIM_OCInitStructure.TIM_OCPolarity = TIM_OCPolarity_High;
+    TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
+    TIM_OCInitStructure.TIM_Pulse = 1500;//todo
+    
+    TIM_OC3Init(TIM3, &TIM_OCInitStructure);
+    
+    TIM_TimeBaseInit(TIM3, &TIM3_InitStructure);
+    TIM_OC3PreloadConfig(TIM3, TIM_OCPreload_Disable);
+    TIM_ARRPreloadConfig(TIM3, ENABLE);
+    TIM_Cmd(TIM3, ENABLE);
+}
 void NVIC_Configure(void) {
 
     NVIC_InitTypeDef NVIC_InitStructure;
@@ -219,8 +284,8 @@ void NVIC_Configure(void) {
     // 'NVIC_EnableIRQ' is only required for USART setting
     NVIC_EnableIRQ(USART1_IRQn);
     NVIC_InitStructure.NVIC_IRQChannel = USART1_IRQn;
-    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0; // TODO  // 우선순위 설정
-    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0; // TODO
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 1;  // 우선순위 설정
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0; 
     NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
     NVIC_Init(&NVIC_InitStructure);
 
@@ -228,8 +293,14 @@ void NVIC_Configure(void) {
     // 'NVIC_EnableIRQ' is only required for USART setting
     NVIC_EnableIRQ(USART2_IRQn);
     NVIC_InitStructure.NVIC_IRQChannel = USART2_IRQn;
-    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0; // TODO
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 1; // TODO
     NVIC_InitStructure.NVIC_IRQChannelSubPriority = 1; // TODO
+    NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
+    NVIC_Init(&NVIC_InitStructure);
+    
+    NVIC_InitStructure.NVIC_IRQChannel = TIM2_IRQn; //todo
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0;
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
     NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
     NVIC_Init(&NVIC_InitStructure);
 }
@@ -266,11 +337,62 @@ void USART2_IRQHandler() { // phone -> putty
         
         // clear 'Read data register not empty' flag
     	USART_ClearITPendingBit(USART2,USART_IT_RXNE);
-        
-              
-    
     }
         
+}
+void TIM2_IRQHandler(void) { //todo
+    
+    if (TIM_GetITStatus(TIM2, TIM_IT_Update) != RESET) {
+        timer_count++;
+
+        // 2초(2000ms) 경과 후 동작
+        if (timer_count >= 2000) {
+            timer_count = 0;
+
+            if (servo_state == 0) {
+                // 90도 -> 180도 이동
+                moveServoToAngle(SERVO_MAX_ANGLE);
+                servo_state = 1;
+            } else {
+                // 180도 -> 90도 복귀
+                moveServoToAngle(SERVO_MID_ANGLE);
+                servo_state = 0;
+            }
+        }
+
+        TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
+    }
+}
+
+void moveServoToAngle(uint16_t pulse) {
+    TIM_SetCompare3(TIM3, pulse); // TIM3 채널 3의 PWM 듀티비 변경
+}
+void moveMotor(uint16_t pulse){
+  // Adjust motorAngle
+    TIM_OCInitTypeDef TIM_OCInitStructure; 
+    TIM_OCInitStructure.TIM_OCMode = TIM_OCMode_PWM1;
+    TIM_OCInitStructure.TIM_OCPolarity = TIM_OCPolarity_High;
+    TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
+    TIM_OCInitStructure.TIM_Pulse = motorAngle;
+
+    TIM_OC3Init(TIM3, &TIM_OCInitStructure); 
+  
+}
+// 진동 센서 값을 읽고 블루투스로 전송
+void read_vibration_sensor(void) {
+    uint32_t vibration_value = ADC_Value[0];  // 진동 센서의 값이 첫 번째 채널에 저장됨
+   
+    if (vibration_value < VIBRATION_THRESHOLD && print_vibration == 0) {
+        char vibration_msg[50];
+        sprintf(vibration_msg, "\r\nVibration Detected! ADC Value: %d\r\n", vibration_value);
+        send_msg_to_putty(vibration_msg); // 푸티로 메시지 전송
+        send_msg_to_bluetooth(vibration_msg);  // 진동 감지 시 핸드폰에 메시지 전송
+        print_vibration = 1;
+    }
+    
+    if (vibration_value > VIBRATION_THRESHOLD  && print_vibration == 1) {
+      print_vibration = 0;
+    }
 }
 
 
@@ -296,6 +418,7 @@ void send_msg_to_putty(char* buf){
     }
 }
 
+
 void delay() {
     for (int i=0; i<1000000; i++);
 }
@@ -307,19 +430,32 @@ int main(void)
     SystemInit();
     RCC_Configure();
     GPIO_Configure();
-    USART1_Init();      // pc
-    USART2_Init();      // bluetooth
     NVIC_Configure();
-    ADC_Configure();
-    DMA_Configure();
+    TIM_Configure();
+    USART1_Init();      // pc
+     USART2_Init();      // bluetooth
     
+   // ADC_Configure();
+  //  DMA_Configure();
     
+    moveServoToAngle(SERVO_MID_ANGLE);
     while (1) { 
-      
-      if(GPIO_ReadInputDataBit(GPIOD, GPIO_Pin_2) == Bit_RESET && !menu_printed){
+      /*
+      if(GPIO_ReadInputDataBit(GPIOD, GPIO_Pin_2) != 0x00 && !menu_printed){
         send_msg_to_bluetooth(msg);
         menu_printed = 1;
       }
+      */
+     // 진동 센서 값 읽기
+    //  read_vibration_sensor();
+      
+     // 거리 센서 값 읽기
+     // read_distance_sensor();
+
+      printf("%d\n",servo_state);
+      delay();
+      
+      
      
     }
 
