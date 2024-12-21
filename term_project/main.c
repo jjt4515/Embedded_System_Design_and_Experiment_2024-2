@@ -11,12 +11,20 @@
 void RCC_Configure(void); //RCC 설정
 void GPIO_Configure(void); //GPIO 설정
 void NVIC_Configure(void); //NVIC 설정
+
 // ADC 관련
 void ADC_Configure(void); 
 void ADC1_2_IRQHandler(void);
 void DMA_Configure(void); //DMA 설정
 
+// 진동센서
+void read_vibration_sensor(void);
 
+// 초음파 감지 센서
+void check_for_object(void);
+
+// 온습도 센서
+void read_temperature_humidity(void);
 
 // bluetooth 관련
 void USART1_Init(void); //USART1(putty) 설정 
@@ -24,22 +32,31 @@ void USART2_Init(void);  //USART2(bluetooth) 설정
 void send_msg_to_bluetooth(char* buf); //USART1(putty)로 문자열 보냄
 void send_msg_to_putty(char* buf); // USART2(bluetooth)로 문자열 보냄
 
+// 레이저
+void start_laser(void); // 레이저 켜는 함수
+void stop_laser(void);  // 레이저 끄는 함수
+
+// 메뉴 처리
+void process_menu_input(char input);
+
 void delay(); //딜레이
 
-/*
-void feed();
-void start_laser();
-void stop_laser();
-void print_status();
-
-char usart1_msg[50]; // usart1(putty)에서 메시지를 받을 때 메세지를 저장할 버퍼이다.
-char usart2_msg[50]; // usart2(bluetooth)에서 메시지를 받을 때 메시지를 저장할 버퍼이다.
-int usart1_index = 0;//usart1_msg 버퍼에 다음으로 문자가 들어갈 인덱스이다.
-int usart2_index = 0;//usart2_msg 버퍼에 다음으로 문자가 들어갈 인덱스이다.
-*/
 int bluetooth_connected = 0;
 int menu_printed = 0;
-volatile uint32_t ADC_Value[2];
+volatile uint32_t ADC_Value[2];// 진동 센서, 온습도 값 저장
+
+// 진동 센서
+#define VIBRATION_THRESHOLD 2885 // 진동 센서 값의 임계값
+
+// 초음파 감지 센서
+#define SOUND_SPEED 343.0 // 속도 (m/s)
+
+// 온습도 센서 관련 값 (ADC 값에서 변환)
+#define ADC_MAX_VALUE 4095.0
+#define TEMP_SENSOR_CALIBRATION 3.3 // 센서의 보정값, 실제 센서에 따라 달라질 수 있음
+#define TEMP_SENSOR_RESOLUTION 0.01 // 온도 변화에 대한 해상도
+
+
 void RCC_Configure(void)
 {  
     // TODO: Enable the APB2 peripheral clock using the function 'RCC_APB2PeriphClockCmd'
@@ -97,8 +114,8 @@ void GPIO_Configure(void)
         GPIO_Init(GPIOA, &GPIO_InitStructure);
         
         
-        // ADC  pc0, pc1, pc2
-        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0 | GPIO_Pin_1 | GPIO_Pin_2;
+        // ADC  pc0, pc1
+        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0 | GPIO_Pin_1;  // 진동, 온습도
         // Set Pin Mode General Output Push-Pull
         GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AIN;
         // Set Pin Speed Max : 50MHz
@@ -111,6 +128,19 @@ void GPIO_Configure(void)
         // Set Pin Speed Max : 50MHz
         GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
         GPIO_Init(GPIOD, &GPIO_InitStructure);
+        
+        // 초음파 감지 센서
+        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_4; // PA4
+        GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+        GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU | GPIO_Mode_IPD;
+        GPIO_Init(GPIOA, &GPIO_InitStructure);
+        
+        
+         // 레이저 제어 핀(PD3)을 출력 모드로 설정
+        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_3; // PD3 (레이저 제어 핀)
+        GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+        GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP; // 출력 모드 (Push-pull)
+        GPIO_Init(GPIOD, &GPIO_InitStructure);
 }
 
 void ADC_Configure(void) {
@@ -121,13 +151,12 @@ void ADC_Configure(void) {
     ADC.ADC_ContinuousConvMode = ENABLE;
     ADC.ADC_DataAlign = ADC_DataAlign_Right;
     ADC.ADC_ExternalTrigConv = ADC_ExternalTrigConv_None;
-    ADC.ADC_NbrOfChannel = 3;
+    ADC.ADC_NbrOfChannel = 2;
     ADC.ADC_ScanConvMode = ENABLE;
     
     ADC_Init(ADC1, &ADC);
     ADC_RegularChannelConfig(ADC1, ADC_Channel_10, 1, ADC_SampleTime_239Cycles5);  //진동
     ADC_RegularChannelConfig(ADC1, ADC_Channel_11, 2, ADC_SampleTime_239Cycles5);  //온습도
-    ADC_RegularChannelConfig(ADC1, ADC_Channel_12, 3, ADC_SampleTime_239Cycles5);  //거리
    // ADC_ITConfig(ADC1,  ADC_IT_EOC, ENABLE );  // interrupt enable
     ADC_Cmd(ADC1, ENABLE);  // ADC1 enable
     ADC_DMACmd(ADC1,ENABLE);
@@ -166,6 +195,7 @@ void DMA_Configure(void) {
 
 	DMA_Cmd(DMA1_Channel1, ENABLE);
 }
+
 
 void USART1_Init(void)
 {
@@ -266,14 +296,82 @@ void USART2_IRQHandler() { // phone -> putty
         
         // clear 'Read data register not empty' flag
     	USART_ClearITPendingBit(USART2,USART_IT_RXNE);
-        
-              
-    
     }
         
 }
 
 
+// 진동 센서 값을 읽고 블루투스로 전송
+void read_vibration_sensor(void) {
+    uint32_t vibration_value = ADC_Value[0];  // 진동 센서의 값이 첫 번째 채널에 저장됨
+  
+    
+    if (vibration_value < VIBRATION_THRESHOLD) {
+        char vibration_msg[50];
+        sprintf(vibration_msg, "\r\nVibration Detected! ADC Value: %d\r\n", vibration_value);
+        send_msg_to_putty(vibration_msg); // 푸티로 메시지 전송
+        send_msg_to_bluetooth(vibration_msg);  // 진동 감지 시 핸드폰에 메시지 전송
+    }
+}
+
+
+// 초음파 감지 센서 (물체 감지)
+void check_for_object(void)
+{
+    // Echo 핀 상태 변화를 감지하여 물체를 감지
+    if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_4) == SET) {  // Echo 핀 HIGH로 변하면
+        char msg[] = "Object detected! Close proximity.";
+        send_msg_to_bluetooth(msg);  // 블루투스로 전송
+        send_msg_to_putty(msg);      // 푸티로 전송
+        
+        read_temperature_humidity();  // 온습도 센서 값 읽기
+    }
+}
+
+// 온습도 센서 값을 읽고 변환하여 출력
+void read_temperature_humidity(void) {
+    // 가상의 코드로, 실제 온도/습도 센서에 맞게 수정 필요.
+    float temp = (ADC_Value[1] / ADC_MAX_VALUE) * 3.3 * 100;  // 온도 계산 (예: 간단한 ADC 변환)
+    float humidity = (ADC_Value[1] / ADC_MAX_VALUE) * 3.3 * 100;  // 습도 계산
+    char buf[50];
+    sprintf(buf, "\r\nTemperature: %.2f C, Humidity: %.2f %%\r\n", temp, humidity);
+    send_msg_to_bluetooth(buf);
+    send_msg_to_putty(buf);
+}
+
+
+// 레이저 켜는 함수
+void start_laser(void) {
+    GPIO_SetBits(GPIOD, GPIO_Pin_3); // PD3 핀에 HIGH 신호를 주어 레이저를 켬
+}
+
+// 레이저 끄는 함수
+void stop_laser(void) {
+    GPIO_ResetBits(GPIOD, GPIO_Pin_3); // PD3 핀에 LOW 신호를 주어 레이저를 끔
+}
+
+
+// 메뉴에서 레이저 제어 옵션 추가
+void process_menu_input(char input) {
+    switch(input) {
+        case '1': //  먹이 주기
+            break;
+        case '2':  // 1번 입력: 레이저 켜기
+            start_laser();
+            send_msg_to_bluetooth("Laser ON\n");
+            send_msg_to_putty("Laser ON\n");
+            break;
+        case '3':  // 2번 입력: 레이저 끄기
+            stop_laser();
+            send_msg_to_bluetooth("Laser OFF\n");
+            send_msg_to_putty("Laser OFF\n");
+            break;
+        default:
+            send_msg_to_bluetooth("Invalid option.\n");
+            send_msg_to_putty("Invalid option.\n");
+            break;
+    }
+}
 
 // 인자의 문자열을 블루투스로 전송
 void send_msg_to_bluetooth(char* buf){
@@ -296,13 +394,15 @@ void send_msg_to_putty(char* buf){
     }
 }
 
+
+
 void delay() {
     for (int i=0; i<1000000; i++);
 }
 
 int main(void)
 {
-    char msg[] = "\r\nWelcome to the cat feed system:\r\n1. Feed \r\n2. Start Laser\r\n3. Stop Laser \r\n4. Print Status\r\nPlease choose an option by entering the number.\r\n";
+    char msg[] = "\r\nWelcome to the cat feed system:\r\n1. Feed \r\n2. Start Laser\r\n3. Stop Laser \r\nPlease choose an option by entering the number.\r\n";
     
     SystemInit();
     RCC_Configure();
@@ -313,13 +413,39 @@ int main(void)
     ADC_Configure();
     DMA_Configure();
     
+     char received_input;
     
     while (1) { 
       
-      if(GPIO_ReadInputDataBit(GPIOD, GPIO_Pin_2) == Bit_RESET && !menu_printed){
+      if(GPIO_ReadInputDataBit(GPIOD, GPIO_Pin_2) != 0x00 && !menu_printed){
         send_msg_to_bluetooth(msg);
         menu_printed = 1;
       }
+      
+      /* 메뉴 출력 부분 이렇게 수정해본다면?
+      if (USART_GetFlagStatus(USART2, USART_FLAG_RXNE) == SET && !menu_printed){
+        send_msg_to_bluetooth(msg);
+        menu_printed = 1;
+      }
+      */
+      
+      // 메뉴에서 사용자 입력 받기 (USART2에서 입력 받기)
+        if (USART_GetFlagStatus(USART2, USART_FLAG_RXNE) == SET) {
+            received_input = USART_ReceiveData(USART2);  // 블루투스로 입력받은 값
+            process_menu_input(received_input);  // 메뉴 처리 함수 호출
+        }
+      
+     // 진동 센서 값 읽기
+      read_vibration_sensor();
+      
+      // 초음파 센서로 물체 감지
+      check_for_object();
+      
+
+      
+      delay();
+      
+      
      
     }
 
