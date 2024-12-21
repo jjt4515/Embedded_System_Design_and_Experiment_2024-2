@@ -16,7 +16,14 @@ void ADC_Configure(void);
 void ADC1_2_IRQHandler(void);
 void DMA_Configure(void); //DMA 설정
 
+// 진동센서
+void read_vibration_sensor(void);
 
+// 초음파 감지 센서
+void check_for_object(void);
+
+// 온습도 센서
+void read_temperature_humidity(void)
 
 // bluetooth 관련
 void USART1_Init(void); //USART1(putty) 설정 
@@ -25,6 +32,8 @@ void send_msg_to_bluetooth(char* buf); //USART1(putty)로 문자열 보냄
 void send_msg_to_putty(char* buf); // USART2(bluetooth)로 문자열 보냄
 
 void delay(); //딜레이
+
+// 거리 센서 작동시 온습도 센서 값 읽도록 구현
 
 /*
 void feed();
@@ -37,9 +46,24 @@ char usart2_msg[50]; // usart2(bluetooth)에서 메시지를 받을 때 메시�
 int usart1_index = 0;//usart1_msg 버퍼에 다음으로 문자가 들어갈 인덱스이다.
 int usart2_index = 0;//usart2_msg 버퍼에 다음으로 문자가 들어갈 인덱스이다.
 */
+
 int bluetooth_connected = 0;
 int menu_printed = 0;
-volatile uint32_t ADC_Value[2];
+int print_vibration = 0;
+volatile uint32_t ADC_Value[2];// 진동 센서, 온습도 값 저장
+
+// 진동 센서
+#define VIBRATION_THRESHOLD 1000 // 진동 센서 값의 임계값
+
+// 초음파 감지 센서
+#define SOUND_SPEED 343.0 // 속도 (m/s)
+
+// 온습도 센서 관련 값 (ADC 값에서 변환)
+#define ADC_MAX_VALUE 4095.0
+#define TEMP_SENSOR_CALIBRATION 3.3 // 센서의 보정값, 실제 센서에 따라 달라질 수 있음
+#define TEMP_SENSOR_RESOLUTION 0.01 // 온도 변화에 대한 해상도
+
+
 void RCC_Configure(void)
 {  
     // TODO: Enable the APB2 peripheral clock using the function 'RCC_APB2PeriphClockCmd'
@@ -97,8 +121,8 @@ void GPIO_Configure(void)
         GPIO_Init(GPIOA, &GPIO_InitStructure);
         
         
-        // ADC  pc0, pc1, pc2
-        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0 | GPIO_Pin_1 | GPIO_Pin_2;
+        // ADC  pc0, pc1
+        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0 | GPIO_Pin_1;
         // Set Pin Mode General Output Push-Pull
         GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AIN;
         // Set Pin Speed Max : 50MHz
@@ -111,6 +135,12 @@ void GPIO_Configure(void)
         // Set Pin Speed Max : 50MHz
         GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
         GPIO_Init(GPIOD, &GPIO_InitStructure);
+        
+        // 초음파 감지 센서
+        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_4; // PA4
+        GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+        GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP; // 출력 모드 (Push-pull)
+        GPIO_Init(GPIOA, &GPIO_InitStructure);
 }
 
 void ADC_Configure(void) {
@@ -121,13 +151,12 @@ void ADC_Configure(void) {
     ADC.ADC_ContinuousConvMode = ENABLE;
     ADC.ADC_DataAlign = ADC_DataAlign_Right;
     ADC.ADC_ExternalTrigConv = ADC_ExternalTrigConv_None;
-    ADC.ADC_NbrOfChannel = 3;
+    ADC.ADC_NbrOfChannel = 2;
     ADC.ADC_ScanConvMode = ENABLE;
     
     ADC_Init(ADC1, &ADC);
     ADC_RegularChannelConfig(ADC1, ADC_Channel_10, 1, ADC_SampleTime_239Cycles5);  //진동
     ADC_RegularChannelConfig(ADC1, ADC_Channel_11, 2, ADC_SampleTime_239Cycles5);  //온습도
-    ADC_RegularChannelConfig(ADC1, ADC_Channel_12, 3, ADC_SampleTime_239Cycles5);  //거리
    // ADC_ITConfig(ADC1,  ADC_IT_EOC, ENABLE );  // interrupt enable
     ADC_Cmd(ADC1, ENABLE);  // ADC1 enable
     ADC_DMACmd(ADC1,ENABLE);
@@ -166,6 +195,7 @@ void DMA_Configure(void) {
 
 	DMA_Cmd(DMA1_Channel1, ENABLE);
 }
+
 
 void USART1_Init(void)
 {
@@ -266,13 +296,53 @@ void USART2_IRQHandler() { // phone -> putty
         
         // clear 'Read data register not empty' flag
     	USART_ClearITPendingBit(USART2,USART_IT_RXNE);
-        
-              
-    
     }
         
 }
 
+
+// 진동 센서 값을 읽고 블루투스로 전송
+void read_vibration_sensor(void) {
+    uint32_t vibration_value = ADC_Value[0];  // 진동 센서의 값이 첫 번째 채널에 저장됨
+   
+    if (vibration_value < VIBRATION_THRESHOLD && print_vibration == 0) {
+        char vibration_msg[50];
+        sprintf(vibration_msg, "\r\nVibration Detected! ADC Value: %d\r\n", vibration_value);
+        send_msg_to_putty(vibration_msg); // 푸티로 메시지 전송
+        send_msg_to_bluetooth(vibration_msg);  // 진동 감지 시 핸드폰에 메시지 전송
+        print_vibration = 1;
+    }
+    
+    if (vibration_value > VIBRATION_THRESHOLD  && print_vibration == 1) {
+      print_vibration = 0;
+    }
+}
+
+
+// 초음파 감지 센서 (물체 감지)
+void check_for_object(void)
+{
+    // Echo 핀 상태 변화를 감지하여 물체를 감지
+    if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_4) == SET) {  // Echo 핀 HIGH로 변하면
+        char msg[] = "Object detected! Close proximity.";
+        send_msg_to_bluetooth(msg);  // 블루투스로 전송
+        send_msg_to_putty(msg);      // 푸티로 전송
+        
+        read_temperature_humidity();  // 온습도 센서 값 읽기
+    }
+}
+
+// 온습도 센서 값을 읽고 변환하여 출력
+void read_temperature_humidity(void) {
+    uint32_t adc_value = ADC_Value[1];  // 온습도 센서의 값이 두 번째 채널에 저장됨
+    float voltage = (adc_value / ADC_MAX_VALUE) * TEMP_SENSOR_CALIBRATION;
+    float temperature = voltage / TEMP_SENSOR_RESOLUTION;  // 센서에서 읽은 값에 따른 온도 계산 (보정 필요)
+
+    char temp_msg[50];
+    sprintf(temp_msg, "\r\nTemperature: %.2f°C\r\n", temperature);
+    send_msg_to_putty(temp_msg);   // 푸티로 메시지 전송
+    send_msg_to_bluetooth(temp_msg); // 블루투스로 메시지 전송
+}
 
 
 // 인자의 문자열을 블루투스로 전송
@@ -296,6 +366,7 @@ void send_msg_to_putty(char* buf){
     }
 }
 
+
 void delay() {
     for (int i=0; i<1000000; i++);
 }
@@ -316,10 +387,28 @@ int main(void)
     
     while (1) { 
       
-      if(GPIO_ReadInputDataBit(GPIOD, GPIO_Pin_2) == Bit_RESET && !menu_printed){
+      if(GPIO_ReadInputDataBit(GPIOD, GPIO_Pin_2) != 0x00 && !menu_printed){
         send_msg_to_bluetooth(msg);
         menu_printed = 1;
       }
+      
+      /* 메뉴 출력 부분 이렇게 수정해본다면?
+      if (USART_GetFlagStatus(USART2, USART_FLAG_RXNE) == SET && !menu_printed){
+        send_msg_to_bluetooth(msg);
+        menu_printed = 1;
+      }
+      */
+      
+     // 진동 센서 값 읽기
+      read_vibration_sensor();
+      
+      // 초음파 센서로 물체 감지
+      check_for_object();
+
+      
+      delay();
+      
+      
      
     }
 
