@@ -1,4 +1,3 @@
-
 #include "stm32f10x.h"
 #include "stm32f10x_exti.h"
 #include "stm32f10x_gpio.h"
@@ -11,28 +10,22 @@
 /* function prototype */
 void RCC_Configure(void); //RCC 설정
 void GPIO_Configure(void); //GPIO 설정
-
+void NVIC_Configure(void); //NVIC 설정
 // ADC 관련
 void ADC_Configure(void); 
 void ADC1_2_IRQHandler(void);
 void DMA_Configure(void); //DMA 설정
-volatile uint32_t ADC_Value[2];
+
+
 
 // bluetooth 관련
 void USART1_Init(void); //USART1(putty) 설정 
 void USART2_Init(void);  //USART2(bluetooth) 설정
-/*
-void end_usart1(); //USART1(putty)에서 받은 문자열 처리
-void end_usart2(); // USART2(bluetooth)에서 받은 문자열 처리
-*/
-
 void send_msg_to_bluetooth(char* buf); //USART1(putty)로 문자열 보냄
-
 void send_msg_to_putty(char* buf); // USART2(bluetooth)로 문자열 보냄
 
-void delay(int); //딜레이
+void delay(); //딜레이
 
-void NVIC_Configure(void); //NVIC 설정
 /*
 void feed();
 void start_laser();
@@ -46,7 +39,7 @@ int usart2_index = 0;//usart2_msg 버퍼에 다음으로 문자가 들어갈 인
 */
 int bluetooth_connected = 0;
 int menu_printed = 0;
-
+volatile uint32_t ADC_Value[2];
 void RCC_Configure(void)
 {  
     // TODO: Enable the APB2 peripheral clock using the function 'RCC_APB2PeriphClockCmd'
@@ -66,6 +59,7 @@ void RCC_Configure(void)
         
         // DMA clock enable
         RCC_AHBPeriphClockCmd(RCC_AHBPeriph_DMA1, ENABLE);
+        RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOD, ENABLE); // Port D
 }
 
 void GPIO_Configure(void)
@@ -103,15 +97,20 @@ void GPIO_Configure(void)
         GPIO_Init(GPIOA, &GPIO_InitStructure);
         
         
-        // ADC
-        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0 | GPIO_Pin_1;
-        
+        // ADC  pc0, pc1, pc2
+        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0 | GPIO_Pin_1 | GPIO_Pin_2;
         // Set Pin Mode General Output Push-Pull
         GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AIN;
-        
         // Set Pin Speed Max : 50MHz
         GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
         GPIO_Init(GPIOC, &GPIO_InitStructure);
+        
+        // check connected
+        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_2;
+        GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU | GPIO_Mode_IPD;
+        // Set Pin Speed Max : 50MHz
+        GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+        GPIO_Init(GPIOD, &GPIO_InitStructure);
 }
 
 void ADC_Configure(void) {
@@ -122,12 +121,13 @@ void ADC_Configure(void) {
     ADC.ADC_ContinuousConvMode = ENABLE;
     ADC.ADC_DataAlign = ADC_DataAlign_Right;
     ADC.ADC_ExternalTrigConv = ADC_ExternalTrigConv_None;
-    ADC.ADC_NbrOfChannel = 2;
+    ADC.ADC_NbrOfChannel = 3;
     ADC.ADC_ScanConvMode = ENABLE;
     
     ADC_Init(ADC1, &ADC);
-    ADC_RegularChannelConfig(ADC1, ADC_Channel_10, 1, ADC_SampleTime_239Cycles5);
-    ADC_RegularChannelConfig(ADC1, ADC_Channel_11, 2, ADC_SampleTime_239Cycles5);
+    ADC_RegularChannelConfig(ADC1, ADC_Channel_10, 1, ADC_SampleTime_239Cycles5);  //진동
+    ADC_RegularChannelConfig(ADC1, ADC_Channel_11, 2, ADC_SampleTime_239Cycles5);  //온습도
+    ADC_RegularChannelConfig(ADC1, ADC_Channel_12, 3, ADC_SampleTime_239Cycles5);  //거리
    // ADC_ITConfig(ADC1,  ADC_IT_EOC, ENABLE );  // interrupt enable
     ADC_Cmd(ADC1, ENABLE);  // ADC1 enable
     ADC_DMACmd(ADC1,ENABLE);
@@ -142,7 +142,7 @@ void ADC_Configure(void) {
 // ADC는 인터럽트 베이스이므로 핸들러 작성 필요, 정의된 이름을 그대로 사용해야 함.
 void ADC1_2_IRQHandler(void) {
     if(ADC_GetITStatus(ADC1, ADC_IT_EOC)!=RESET){
-        value = ADC_GetConversionValue(ADC1);
+       // value = ADC_GetConversionValue(ADC1);
   
         ADC_ClearITPendingBit(ADC1,ADC_IT_EOC);
     }
@@ -241,16 +241,13 @@ void USART1_IRQHandler() { // putty -> phone
  
     if(USART_GetITStatus(USART1,USART_IT_RXNE)!=RESET){
       
-             
         // the most recent received data by the USART1 peripheral
         word = USART_ReceiveData(USART1);
-      
 
         // TODO implement
         while ((USART1->SR & USART_SR_TXE) == 0);
         USART_SendData(USART2, word); // 데이터 입력 시 usart1을 통해 보드로 전송
         
-
         // clear 'Read data register not empty' flag
     	USART_ClearITPendingBit(USART1,USART_IT_RXNE);
     }
@@ -260,30 +257,12 @@ void USART2_IRQHandler() { // phone -> putty
     uint16_t word;
     if(USART_GetITStatus(USART2,USART_IT_RXNE)!=RESET){
 
-     
         // the most recent received data by the USART2 peripheral
         word = USART_ReceiveData(USART2);
-      /* 
-         if (word == 1) {
-            send_msg_to_bluetooth("Option 1 selected\r\n");
-            
-        } else if (word == 2) {
-            send_msg_to_bluetooth("Option 2 selected\r\n");
-            
-        } else if (word == '3') {
-            send_msg_to_bluetooth("Option 3 selected\r\n");
-            
-        } else if (word == '4') {
-            send_msg_to_bluetooth("Option 3 selected\r\n");
-            
-        } else {
-            send_msg_to_bluetooth("Invalid option\r\n");
-        }
-*/
+      
         // TODO implement
         while ((USART2->SR & USART_SR_TXE) == 0);
         USART_SendData(USART1, word); // 데이터 입력 시 보드를 통해 usart1으로 전송
-
         
         // clear 'Read data register not empty' flag
     	USART_ClearITPendingBit(USART2,USART_IT_RXNE);
@@ -317,52 +296,33 @@ void send_msg_to_putty(char* buf){
     }
 }
 
-void delay(int delay_value) {
-    for (int i=0; i<delay_value; i++) {}
+void delay() {
+    for (int i=0; i<1000000; i++);
 }
 
 int main(void)
 {
     char msg[] = "\r\nWelcome to the cat feed system:\r\n1. Feed \r\n2. Start Laser\r\n3. Stop Laser \r\n4. Print Status\r\nPlease choose an option by entering the number.\r\n";
-
-    unsigned int i;
-  
+    
     SystemInit();
-
     RCC_Configure();
-
     GPIO_Configure();
-
     USART1_Init();      // pc
-    
     USART2_Init();      // bluetooth
-
     NVIC_Configure();
-    
     ADC_Configure();
-
     DMA_Configure();
     
-    delay(10000000);
-
-    send_msg_to_putty(msg);
     
-      
     while (1) { 
       
-      if(bluetooth_connected) {
-         delay(10000000);
-            send_msg_to_putty("abc");
+      if(GPIO_ReadInputDataBit(GPIOD, GPIO_Pin_2) == Bit_RESET && !menu_printed){
         send_msg_to_bluetooth(msg);
-           send_msg_to_putty("dvsa");
-         delay(10000000);
         menu_printed = 1;
-
       }
-     if(menu_printed==1) break;
      
     }
-    while(1);
+
     
-    return 0;
+  
 }
