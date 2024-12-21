@@ -31,14 +31,20 @@ void USART2_Init(void);  //USART2(bluetooth) 설정
 void send_msg_to_bluetooth(char* buf); //USART1(putty)로 문자열 보냄
 void send_msg_to_putty(char* buf); // USART2(bluetooth)로 문자열 보냄
 
+// 레이저
+void start_laser(void); // 레이저 켜는 함수
+void stop_laser(void);  // 레이저 끄는 함수
+
+// 메뉴 처리
+void process_menu_input(char input);
+
+
 void delay(); //딜레이
 
 // 거리 센서 작동시 온습도 센서 값 읽도록 구현
 
 /*
 void feed();
-void start_laser();
-void stop_laser();
 void print_status();
 
 char usart1_msg[50]; // usart1(putty)에서 메시지를 받을 때 메세지를 저장할 버퍼이다.
@@ -141,6 +147,13 @@ void GPIO_Configure(void)
         GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
         GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP; // 출력 모드 (Push-pull)
         GPIO_Init(GPIOA, &GPIO_InitStructure);
+        
+        
+         // 레이저 제어 핀(PD3)을 출력 모드로 설정
+        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_3; // PD3 (레이저 제어 핀)
+        GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+        GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP; // 출력 모드 (Push-pull)
+        GPIO_Init(GPIOD, &GPIO_InitStructure);
 }
 
 void ADC_Configure(void) {
@@ -344,6 +357,36 @@ void read_temperature_humidity(void) {
     send_msg_to_bluetooth(temp_msg); // 블루투스로 메시지 전송
 }
 
+// 레이저 켜는 함수
+void start_laser(void) {
+    GPIO_SetBits(GPIOD, GPIO_Pin_3); // PD3 핀에 HIGH 신호를 주어 레이저를 켬
+}
+
+// 레이저 끄는 함수
+void stop_laser(void) {
+    GPIO_ResetBits(GPIOD, GPIO_Pin_3); // PD3 핀에 LOW 신호를 주어 레이저를 끔
+}
+
+
+// 메뉴에서 레이저 제어 옵션 추가
+void process_menu_input(char input) {
+    switch(input) {
+        case '2':  // 1번 입력: 레이저 켜기
+            start_laser();
+            send_msg_to_bluetooth("Laser ON\n");
+            send_msg_to_putty("Laser ON\n");
+            break;
+        case '3':  // 2번 입력: 레이저 끄기
+            stop_laser();
+            send_msg_to_bluetooth("Laser OFF\n");
+            send_msg_to_putty("Laser OFF\n");
+            break;
+        default:
+            send_msg_to_bluetooth("Invalid option.\n");
+            send_msg_to_putty("Invalid option.\n");
+            break;
+    }
+}
 
 // 인자의 문자열을 블루투스로 전송
 void send_msg_to_bluetooth(char* buf){
@@ -367,6 +410,7 @@ void send_msg_to_putty(char* buf){
 }
 
 
+
 void delay() {
     for (int i=0; i<1000000; i++);
 }
@@ -384,6 +428,7 @@ int main(void)
     ADC_Configure();
     DMA_Configure();
     
+     char received_input;
     
     while (1) { 
       
@@ -398,6 +443,12 @@ int main(void)
         menu_printed = 1;
       }
       */
+      
+      // 메뉴에서 사용자 입력 받기 (USART2에서 입력 받기)
+        if (USART_GetFlagStatus(USART2, USART_FLAG_RXNE) == SET) {
+            received_input = USART_ReceiveData(USART2);  // 블루투스로 입력받은 값
+            process_menu_input(received_input);  // 메뉴 처리 함수 호출
+        }
       
      // 진동 센서 값 읽기
       read_vibration_sensor();
