@@ -1,53 +1,81 @@
-
 #include "stm32f10x.h"
 #include "stm32f10x_exti.h"
 #include "stm32f10x_gpio.h"
 #include "stm32f10x_usart.h"
 #include "stm32f10x_rcc.h"
 #include "stm32f10x_adc.h"
-
+#include "stdio.h"
 #include "misc.h"
 
 /* function prototype */
 void RCC_Configure(void); //RCC 설정
 void GPIO_Configure(void); //GPIO 설정
+void NVIC_Configure(void); //NVIC 설정
 
 // ADC 관련
 void ADC_Configure(void); 
 void ADC1_2_IRQHandler(void);
 void DMA_Configure(void); //DMA 설정
-volatile uint32_t ADC_Value[2];
+
+//모터관련
+void TIM_Configure(void);
+void moveMotor(uint16_t pulse);
+void moveLasor(uint16_t pulse);
+
+// 진동센서
+void read_vibration_sensor(void);
+
+// 초음파 감지 센서
+void check_for_object(void);
+
+// 온습도 센서
+void read_temperature_humidity(void);
 
 // bluetooth 관련
 void USART1_Init(void); //USART1(putty) 설정 
 void USART2_Init(void);  //USART2(bluetooth) 설정
-/*
-void end_usart1(); //USART1(putty)에서 받은 문자열 처리
-void end_usart2(); // USART2(bluetooth)에서 받은 문자열 처리
-*/
-
 void send_msg_to_bluetooth(char* buf); //USART1(putty)로 문자열 보냄
-
 void send_msg_to_putty(char* buf); // USART2(bluetooth)로 문자열 보냄
 
-void delay(int); //딜레이
-
-void NVIC_Configure(void); //NVIC 설정
-/*
+// 메인함수 관련
+void delay(); //딜레이
 void feed();
-void start_laser();
-void stop_laser();
-void print_status();
 
-char usart1_msg[50]; // usart1(putty)에서 메시지를 받을 때 메세지를 저장할 버퍼이다.
-char usart2_msg[50]; // usart2(bluetooth)에서 메시지를 받을 때 메시지를 저장할 버퍼이다.
-int usart1_index = 0;//usart1_msg 버퍼에 다음으로 문자가 들어갈 인덱스이다.
-int usart2_index = 0;//usart2_msg 버퍼에 다음으로 문자가 들어갈 인덱스이다.
-*/
+// timer counter
+volatile uint8_t servo_state = 0; // 0: 90도, 1: 180도
+volatile uint32_t timer_count = 0; // 2초 대기 카운터
+volatile uint32_t lasor_count = 0; // 10초 레이저 카운터
+
+// 서보모터 PWM 값 정의
+#define SERVO_MIN_ANGLE 500   // 0도일 때의 PWM 신호 (us)
+#define SERVO_MAX_ANGLE 2000  // 180도일 때의 PWM 신호 (us)
+#define SERVO_MID_ANGLE 1500  // 90도일 때의 PWM 신호 (us)
+
+// 레이저
+void set_laser(void); // 레이저 켜는 함수
+void reset_laser(void); // 레이저 끄는 함수
+
+// 메뉴 처리
+void process_menu_input(uint16_t);
+int feed_activate = 0;
+int lasor_activate = 0;
 int bluetooth_connected = 0;
 int menu_printed = 0;
+volatile uint32_t ADC_Value[2];// 진동 센서, 온습도 값 저장
+int is_command = 0;
 
-#define THRESHOLD 1000; // Vibration value threshold
+
+// 진동 센서
+#define VIBRATION_THRESHOLD 2885 // 진동 센서 값의 임계값
+
+// 초음파 감지 센서
+#define SOUND_SPEED 343.0 // 속도 (m/s)
+
+// 온습도 센서 관련 값 (ADC 값에서 변환)
+#define ADC_MAX_VALUE 4095.0
+#define TEMP_SENSOR_CALIBRATION 3.3 // 센서의 보정값, 실제 센서에 따라 달라질 수 있음
+#define TEMP_SENSOR_RESOLUTION 0.01 // 온도 변화에 대한 해상도
+
 
 void RCC_Configure(void)
 {  
@@ -59,7 +87,10 @@ void RCC_Configure(void)
 	/* USART1, USART2 clock enable */
         RCC_APB2PeriphClockCmd(RCC_APB2Periph_USART1, ENABLE);
         RCC_APB1PeriphClockCmd(RCC_APB1Periph_USART2, ENABLE);
-		
+	/* PWM */
+        RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM2, ENABLE); // TIM2 
+	RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOB, ENABLE); // Port B
+        RCC_APB1PeriphClockCmd(RCC_APB1Periph_TIM3, ENABLE); // TIM3 for pwm
 	/* Alternate Function IO clock enable */
         RCC_APB2PeriphClockCmd(RCC_APB2Periph_AFIO, ENABLE);
         
@@ -68,6 +99,7 @@ void RCC_Configure(void)
         
         // DMA clock enable
         RCC_AHBPeriphClockCmd(RCC_AHBPeriph_DMA1, ENABLE);
+        RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOD, ENABLE); // Port D
 }
 
 void GPIO_Configure(void)
@@ -105,15 +137,43 @@ void GPIO_Configure(void)
         GPIO_Init(GPIOA, &GPIO_InitStructure);
         
         
-        // ADC
-        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0 | GPIO_Pin_1;
-        
+        // ADC  pc0, pc1
+        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_0 | GPIO_Pin_1;  // 진동, 온습도
         // Set Pin Mode General Output Push-Pull
         GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AIN;
-        
-        // Set Pin Speed Max : 50MHz
         GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
         GPIO_Init(GPIOC, &GPIO_InitStructure);
+        
+        // check connected
+        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_2;
+        GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU ;//| GPIO_Mode_IPD;
+        GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+        GPIO_Init(GPIOD, &GPIO_InitStructure);
+
+        //pwm feeding motor
+        GPIO_InitTypeDef GPIO_InitStructure2;   // TIM3 채널 3 핀
+        GPIO_InitStructure2.GPIO_Pin = GPIO_Pin_0;
+        GPIO_InitStructure2.GPIO_Speed = GPIO_Speed_50MHz;
+        GPIO_InitStructure2.GPIO_Mode = GPIO_Mode_AF_PP;
+        GPIO_Init(GPIOB, &GPIO_InitStructure2);
+        
+        //pwm lasor motor
+        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_7; // TIM3 채널 2 핀
+        GPIO_InitStructure.GPIO_Mode = GPIO_Mode_AF_PP; // 대체 기능 출력
+        GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+        GPIO_Init(GPIOA, &GPIO_InitStructure);
+
+        // 초음파 감지 센서
+        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_4; // PA4
+        GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+        GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU | GPIO_Mode_IPD;
+        GPIO_Init(GPIOA, &GPIO_InitStructure);
+        
+         // 레이저 제어 핀(PD3)을 출력 모드로 설정
+        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_3; // PD3 (레이저 제어 핀)
+        GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
+        GPIO_InitStructure.GPIO_Mode = GPIO_Mode_Out_PP; // 출력 모드 (Push-pull)
+        GPIO_Init(GPIOD, &GPIO_InitStructure);
 }
 
 void ADC_Configure(void) {
@@ -128,9 +188,9 @@ void ADC_Configure(void) {
     ADC.ADC_ScanConvMode = ENABLE;
     
     ADC_Init(ADC1, &ADC);
-    ADC_RegularChannelConfig(ADC1, ADC_Channel_10, 1, ADC_SampleTime_239Cycles5);
-    ADC_RegularChannelConfig(ADC1, ADC_Channel_11, 2, ADC_SampleTime_239Cycles5);
-   // ADC_ITConfig(ADC1,  ADC_IT_EOC, ENABLE );  // interrupt enable
+    ADC_RegularChannelConfig(ADC1, ADC_Channel_10, 1, ADC_SampleTime_239Cycles5);  //진동
+    ADC_RegularChannelConfig(ADC1, ADC_Channel_11, 2, ADC_SampleTime_239Cycles5);  //온습도
+
     ADC_Cmd(ADC1, ENABLE);  // ADC1 enable
     ADC_DMACmd(ADC1,ENABLE);
     
@@ -144,19 +204,8 @@ void ADC_Configure(void) {
 // ADC는 인터럽트 베이스이므로 핸들러 작성 필요, 정의된 이름을 그대로 사용해야 함.
 void ADC1_2_IRQHandler(void) {
     if(ADC_GetITStatus(ADC1, ADC_IT_EOC)!=RESET){
-	static channel_index = 0;
-        value = ADC_GetConversionValue(ADC1);
-
-	//ADC channel10 for vibration sensor PC0
-	if(channel_index == 0){
-            channel10_value = value;
-	    if(channel10_value > THRESHOLD){
-		    send_msg_to_bluetooth("Vibration detected");
-	    }
-	}
-
-
-	channel_index = (channel_index + 1) % 2;
+       //value = ADC_GetConversionValue(ADC1);
+  
         ADC_ClearITPendingBit(ADC1,ADC_IT_EOC);
     }
 }
@@ -179,6 +228,7 @@ void DMA_Configure(void) {
 
 	DMA_Cmd(DMA1_Channel1, ENABLE);
 }
+
 
 void USART1_Init(void)
 {
@@ -220,7 +270,46 @@ void USART2_Init(void)
 	USART_ITConfig(USART2, USART_IT_RXNE, ENABLE); // Receive Data register not empty interrupt
 	
 }
-
+void TIM_Configure(void)
+{
+    
+    TIM_TimeBaseInitTypeDef TIM2_InitStructure;
+    // TIM2 설정: 1ms 주기로 인터럽트 발생
+    uint16_t  prescale = (uint16_t) (SystemCoreClock / 10000);
+    TIM2_InitStructure.TIM_Period = 10000; // 1ms 주기
+    TIM2_InitStructure.TIM_Prescaler = prescale; // 1kHz
+    TIM2_InitStructure.TIM_ClockDivision = 0;
+    TIM2_InitStructure.TIM_CounterMode = TIM_CounterMode_Down;
+    
+    TIM_TimeBaseInit(TIM2, &TIM2_InitStructure);
+    TIM_ARRPreloadConfig(TIM2, ENABLE);
+    TIM_Cmd(TIM2, ENABLE);
+    TIM_ITConfig(TIM2, TIM_IT_Update, ENABLE);
+    
+    // feeding motor pwm timer
+    TIM_TimeBaseInitTypeDef TIM3_InitStructure;
+    TIM_OCInitTypeDef TIM_OCInitStructure;
+    
+    prescale = (uint16_t) (SystemCoreClock / 1000000) ;
+    
+    TIM3_InitStructure.TIM_Period = 20000 ;
+    TIM3_InitStructure.TIM_Prescaler = prescale;
+    TIM3_InitStructure.TIM_ClockDivision = 0;
+    TIM3_InitStructure.TIM_CounterMode = TIM_CounterMode_Down;
+    TIM_TimeBaseInit(TIM3, &TIM3_InitStructure);
+    
+    TIM_OCInitStructure.TIM_OCMode = TIM_OCMode_PWM1;
+    TIM_OCInitStructure.TIM_OCPolarity = TIM_OCPolarity_High;
+    TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
+    TIM_OCInitStructure.TIM_Pulse = SERVO_MID_ANGLE;
+    TIM_OC3Init(TIM3, &TIM_OCInitStructure);   //feeding 서보모터
+    TIM_OC2Init(TIM3, &TIM_OCInitStructure);  //레이저 서보모터
+   
+    TIM_OC3PreloadConfig(TIM3, TIM_OCPreload_Disable);
+    TIM_OC2PreloadConfig(TIM3, TIM_OCPreload_Disable);
+    TIM_ARRPreloadConfig(TIM3, ENABLE);
+    TIM_Cmd(TIM3, ENABLE);
+}
 void NVIC_Configure(void) {
 
     NVIC_InitTypeDef NVIC_InitStructure;
@@ -232,8 +321,8 @@ void NVIC_Configure(void) {
     // 'NVIC_EnableIRQ' is only required for USART setting
     NVIC_EnableIRQ(USART1_IRQn);
     NVIC_InitStructure.NVIC_IRQChannel = USART1_IRQn;
-    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0; // TODO  // 우선순위 설정
-    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0; // TODO
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 1;  // 우선순위 설정
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0; 
     NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
     NVIC_Init(&NVIC_InitStructure);
 
@@ -241,8 +330,14 @@ void NVIC_Configure(void) {
     // 'NVIC_EnableIRQ' is only required for USART setting
     NVIC_EnableIRQ(USART2_IRQn);
     NVIC_InitStructure.NVIC_IRQChannel = USART2_IRQn;
-    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0; // TODO
-    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 1; // TODO
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 0;
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 0;
+    NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
+    NVIC_Init(&NVIC_InitStructure);
+    
+    NVIC_InitStructure.NVIC_IRQChannel = TIM2_IRQn; //todo
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 1;
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 1;
     NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
     NVIC_Init(&NVIC_InitStructure);
 }
@@ -254,16 +349,14 @@ void USART1_IRQHandler() { // putty -> phone
  
     if(USART_GetITStatus(USART1,USART_IT_RXNE)!=RESET){
       
-             
         // the most recent received data by the USART1 peripheral
         word = USART_ReceiveData(USART1);
-      
 
-        // TODO implement
-        while ((USART1->SR & USART_SR_TXE) == 0);
+        
+        //while ((USART1->SR & USART_SR_TXE) == 0);
         USART_SendData(USART2, word); // 데이터 입력 시 usart1을 통해 보드로 전송
         
-
+        
         // clear 'Read data register not empty' flag
     	USART_ClearITPendingBit(USART1,USART_IT_RXNE);
     }
@@ -271,43 +364,138 @@ void USART1_IRQHandler() { // putty -> phone
 
 void USART2_IRQHandler() { // phone -> putty
     uint16_t word;
+    uint16_t receive_num;
     if(USART_GetITStatus(USART2,USART_IT_RXNE)!=RESET){
 
-     
         // the most recent received data by the USART2 peripheral
         word = USART_ReceiveData(USART2);
-      /* 
-         if (word == 1) {
-            send_msg_to_bluetooth("Option 1 selected\r\n");
-            
-        } else if (word == 2) {
-            send_msg_to_bluetooth("Option 2 selected\r\n");
-            
-        } else if (word == '3') {
-            send_msg_to_bluetooth("Option 3 selected\r\n");
-            
-        } else if (word == '4') {
-            send_msg_to_bluetooth("Option 3 selected\r\n");
-            
-        } else {
-            send_msg_to_bluetooth("Invalid option\r\n");
+        receive_num = word - '0';
+        if (receive_num <= 99999999 && receive_num >=1) {
+          is_command = receive_num;
         }
-*/
-        // TODO implement
-        while ((USART2->SR & USART_SR_TXE) == 0);
-        USART_SendData(USART1, word); // 데이터 입력 시 보드를 통해 usart1으로 전송
-
         
+        //while ((USART2->SR & USART_SR_TXE) == 0);
+        USART_SendData(USART1, word); // 데이터 입력 시 보드를 통해 usart1으로 전송
+     
+
         // clear 'Read data register not empty' flag
     	USART_ClearITPendingBit(USART2,USART_IT_RXNE);
-        
-              
-    
     }
+}
+
+void TIM2_IRQHandler(void) { 
+    
+    if (TIM_GetITStatus(TIM2, TIM_IT_Update) != RESET) {
+      if(feed_activate){
+        timer_count++;
+
+        // feeding bowl open. after 2 sec , closed
+        if (timer_count >= 2) {
+            timer_count = 0;
+
+            if (servo_state == 0) {
+                // 90도 -> 180도 이동
+                moveMotor(SERVO_MAX_ANGLE);
+                servo_state = 1;
+            } else {
+                // 180도 -> 90도 복귀
+                moveMotor(SERVO_MID_ANGLE);
+                servo_state = 0;
+                feed_activate = 0;
+            }
+        }
+      }
+      if(lasor_activate){
+        lasor_count++;
+        if(lasor_count % 2 == 1) moveLasor(SERVO_MAX_ANGLE);
+        else moveLasor(SERVO_MIN_ANGLE);
         
+        if(lasor_count >= 10){
+          reset_laser();
+          lasor_count = 0;
+        }
+      }
+        
+      TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
+    }
+}
+// 진동 센서 값을 읽고 블루투스로 전송
+void read_vibration_sensor(void) {
+    uint32_t vibration_value = ADC_Value[0];  // 진동 센서의 값이 첫 번째 채널에 저장됨
+  
+    
+    if (vibration_value < VIBRATION_THRESHOLD) {
+        char vibration_msg[50];
+        sprintf(vibration_msg, "\r\nVibration Detected! ADC Value: %d\r\n", vibration_value);
+        send_msg_to_putty(vibration_msg); // 푸티로 메시지 전송
+        send_msg_to_bluetooth(vibration_msg);  // 진동 감지 시 핸드폰에 메시지 전송
+    }
 }
 
 
+// 초음파 감지 센서 (물체 감지)
+void check_for_object(void)
+{
+    // Echo 핀 상태 변화를 감지하여 물체를 감지
+    if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_4) == SET) {  // Echo 핀 HIGH로 변하면
+        char msg[] = "Object detected! Close proximity.";
+        send_msg_to_bluetooth(msg);  // 블루투스로 전송
+        send_msg_to_putty(msg);      // 푸티로 전송
+        
+        read_temperature_humidity();  // 온습도 센서 값 읽기
+    }
+}
+
+// 온습도 센서 값을 읽고 변환하여 출력
+void read_temperature_humidity(void) {
+    // 가상의 코드로, 실제 온도/습도 센서에 맞게 수정 필요.
+    float temp = (ADC_Value[1] / ADC_MAX_VALUE) * 3.3 * 100;  // 온도 계산 (예: 간단한 ADC 변환)
+    float humidity = (ADC_Value[1] / ADC_MAX_VALUE) * 3.3 * 100;  // 습도 계산
+    char buf[50];
+    sprintf(buf, "\r\nTemperature: %.2f C, Humidity: %.2f %%\r\n", temp, humidity);
+    send_msg_to_bluetooth(buf);
+    send_msg_to_putty(buf);
+}
+
+
+// 레이저 켜는 함수
+void set_laser(void) {
+    GPIO_SetBits(GPIOD, GPIO_Pin_3); // PD3 핀에 HIGH 신호를 주어 레이저를 켬
+    
+     lasor_activate = 1;
+     
+      send_msg_to_bluetooth("\r\nLaser ON\r\n");
+      send_msg_to_putty("\r\nLaser ON\r\n");
+     delay();
+}
+
+// 레이저 끄는 함수
+void reset_laser(void) {
+    GPIO_ResetBits(GPIOD, GPIO_Pin_3); // PD3 핀에 LOW 신호를 주어 레이저를 끔
+     lasor_activate = 0;
+     send_msg_to_bluetooth("\r\nLaser OFF\r\n");
+     send_msg_to_putty("\r\nLaser OFF\r\n");
+     delay();
+}
+
+
+
+// 메뉴에서 레이저 제어 옵션 추가
+void process_menu_input(uint16_t input) {
+        switch(input){
+            case 1: //  1번 입력: 먹이 주기
+                feed();
+                break;
+            case 2:  // 2번 입력: 레이저 켜기
+                set_laser();
+                break;
+            default:
+                send_msg_to_bluetooth("\r\nInvalid option.\r\n");
+                send_msg_to_putty("\r\nInvalid option.\r\n");
+                break;
+    }
+
+}
 
 // 인자의 문자열을 블루투스로 전송
 void send_msg_to_bluetooth(char* buf){
@@ -319,8 +507,6 @@ void send_msg_to_bluetooth(char* buf){
     }
 }
 
-
-// 인자의 문자열을 PUTTY로 전송
 void send_msg_to_putty(char* buf){
     for (int i=0;; i++) {
         if (buf[i] == '\0')             // 문자열의 끝이라면 무한 반복 종료
@@ -330,52 +516,96 @@ void send_msg_to_putty(char* buf){
     }
 }
 
-void delay(int delay_value) {
-    for (int i=0; i<delay_value; i++) {}
+void moveMotor(uint16_t pulse){
+  // Adjust motorAngle
+    TIM_OCInitTypeDef TIM_OCInitStructure; 
+    TIM_OCInitStructure.TIM_OCMode = TIM_OCMode_PWM1;
+    TIM_OCInitStructure.TIM_OCPolarity = TIM_OCPolarity_High;
+    TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
+    TIM_OCInitStructure.TIM_Pulse = pulse;
+
+    TIM_OC3Init(TIM3, &TIM_OCInitStructure); 
+}
+void moveLasor(uint16_t pulse){
+  // Adjust LasorAngle
+    TIM_OCInitTypeDef TIM_OCInitStructure; 
+    TIM_OCInitStructure.TIM_OCMode = TIM_OCMode_PWM1;
+    TIM_OCInitStructure.TIM_OCPolarity = TIM_OCPolarity_High;
+    TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
+    TIM_OCInitStructure.TIM_Pulse = pulse;
+
+    TIM_OC2Init(TIM3, &TIM_OCInitStructure); 
+}
+
+void feed(){
+  feed_activate = 1;
+  send_msg_to_bluetooth("\r\nFeed\r\n");
+  send_msg_to_putty("\r\nFeed\r\n");
+  delay();
+}
+                              
+
+
+
+void delay() {
+    for (int i=0; i<1000000; i++);
 }
 
 int main(void)
 {
-    char msg[] = "\r\nWelcome to the cat feed system:\r\n1. Feed \r\n2. Start Laser\r\n3. Stop Laser \r\n4. Print Status\r\nPlease choose an option by entering the number.\r\n";
-
-    unsigned int i;
-  
+    char msg[] = "\r\nWelcome to the cat feed system:\r\n1. Feed \r\n2. Start Laser\r\nPlease choose an option by entering the number.\r\n";
     SystemInit();
-
     RCC_Configure();
-
     GPIO_Configure();
+    NVIC_Configure();
 
+    TIM_Configure();
     USART1_Init();      // pc
-    
     USART2_Init();      // bluetooth
 
-    NVIC_Configure();
-    
     ADC_Configure();
-
     DMA_Configure();
     
-    delay(10000000);
+    uint16_t receive_data;
 
-    send_msg_to_putty(msg);
-    
-      
+   // moveServoToAngle(SERVO_MID_ANGLE);
     while (1) { 
+   
       
-      if(bluetooth_connected) {
-         delay(10000000);
-            send_msg_to_putty("abc");
-        send_msg_to_bluetooth(msg);
-           send_msg_to_putty("dvsa");
-         delay(10000000);
-        menu_printed = 1;
 
+      if(GPIO_ReadInputDataBit(GPIOD, GPIO_Pin_2) != SET && !menu_printed){
+        menu_printed = 1;
+        send_msg_to_bluetooth(msg);
+        is_command = 0;
+        
+        while(1){
+          if(is_command) {
+            process_menu_input(is_command);
+            delay();
+            is_command = 0;
+        }
+         
+        }
+        
       }
-     if(menu_printed==1) break;
+      
+      
+      
+      // 메뉴에서 사용자 입력 받기 (USART2에서 입력 받기)
+       
+      
+     // 진동 센서 값 읽기
+    //  read_vibration_sensor();
+      
+      // 초음파 센서로 물체 감지
+     // check_for_object();
+      
+
+      
+      delay();
+
      
     }
-    while(1);
-    
-    return 0;
+
 }
+
