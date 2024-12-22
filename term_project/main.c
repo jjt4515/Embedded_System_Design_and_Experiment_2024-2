@@ -47,6 +47,8 @@ int usart2_index = 0;//usart2_msg 버퍼에 다음으로 문자가 들어갈 인
 int bluetooth_connected = 0;
 int menu_printed = 0;
 
+#define THRESHOLD 1000; // Vibration value threshold
+
 void RCC_Configure(void)
 {  
     // TODO: Enable the APB2 peripheral clock using the function 'RCC_APB2PeriphClockCmd'
@@ -142,8 +144,19 @@ void ADC_Configure(void) {
 // ADC는 인터럽트 베이스이므로 핸들러 작성 필요, 정의된 이름을 그대로 사용해야 함.
 void ADC1_2_IRQHandler(void) {
     if(ADC_GetITStatus(ADC1, ADC_IT_EOC)!=RESET){
+	static channel_index = 0;
         value = ADC_GetConversionValue(ADC1);
-  
+
+	//ADC channel10 for vibration sensor PC0
+	if(channel_index == 0){
+            channel10_value = value;
+	    if(channel10_value > THRESHOLD){
+		    send_msg_to_bluetooth("Vibration detected");
+	    }
+	}
+
+
+	channel_index = (channel_index + 1) % 2;
         ADC_ClearITPendingBit(ADC1,ADC_IT_EOC);
     }
 }
