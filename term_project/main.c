@@ -328,8 +328,8 @@ void NVIC_Configure(void) {
     // 'NVIC_EnableIRQ' is only required for USART setting
     NVIC_EnableIRQ(USART2_IRQn);
     NVIC_InitStructure.NVIC_IRQChannel = USART2_IRQn;
-    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 1; // TODO
-    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 1; // TODO
+    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = 1;
+    NVIC_InitStructure.NVIC_IRQChannelSubPriority = 1;
     NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
     NVIC_Init(&NVIC_InitStructure);
     
@@ -439,7 +439,7 @@ void TIM2_IRQHandler(void) { //todo
                 servo_state = 1;
             } else {
                 // 180도 -> 90도 복귀
-                moveMotor(SERVO_MIN_ANGLE);
+                moveMotor(SERVO_MID_ANGLE);
                 servo_state = 0;
                 feed_activate = 0;
             }
