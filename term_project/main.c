@@ -64,17 +64,14 @@ int menu_printed = 0;
 volatile uint32_t ADC_Value[2];// 진동 센서, 온습도 값 저장
 int is_command = 0;
 
-
 // 진동 센서
-#define VIBRATION_THRESHOLD 2885 // 진동 센서 값의 임계값
+#define VIBRATION_THRESHOLD 2880 // 진동 센서 값의 임계값
 
 // 초음파 감지 센서
 #define SOUND_SPEED 343.0 // 속도 (m/s)
 
 // 온습도 센서 관련 값 (ADC 값에서 변환)
 #define ADC_MAX_VALUE 4095.0
-#define TEMP_SENSOR_CALIBRATION 3.3 // 센서의 보정값, 실제 센서에 따라 달라질 수 있음
-#define TEMP_SENSOR_RESOLUTION 0.01 // 온도 변화에 대한 해상도
 
 
 void RCC_Configure(void)
@@ -106,7 +103,7 @@ void GPIO_Configure(void)
 {
     GPIO_InitTypeDef GPIO_InitStructure;
     
-   	// TODO: Initialize the GPIO pins using the structure 'GPIO_InitTypeDef' and the function 'GPIO_Init'
+   	
 
     /* USART1 pin setting */
         //TX
@@ -145,7 +142,7 @@ void GPIO_Configure(void)
         GPIO_Init(GPIOC, &GPIO_InitStructure);
         
         // check connected
-        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_2;
+        GPIO_InitStructure.GPIO_Pin = GPIO_Pin_4; //PD4
         GPIO_InitStructure.GPIO_Mode = GPIO_Mode_IPU ;//| GPIO_Mode_IPD;
         GPIO_InitStructure.GPIO_Speed = GPIO_Speed_50MHz;
         GPIO_Init(GPIOD, &GPIO_InitStructure);
@@ -232,7 +229,7 @@ void DMA_Configure(void) {
 
 void USART1_Init(void)
 {
-    USART_InitTypeDef USART1_InitStructure;
+        USART_InitTypeDef USART1_InitStructure;
 
 	// Enable the USART1 peripheral
 	USART_Cmd(USART1, ENABLE);
@@ -252,7 +249,7 @@ void USART1_Init(void)
 
 void USART2_Init(void)
 {
-    USART_InitTypeDef USART2_InitStructure;
+        USART_InitTypeDef USART2_InitStructure;
 
 	// Enable the USART2 peripheral
 	USART_Cmd(USART2, ENABLE);
@@ -270,6 +267,7 @@ void USART2_Init(void)
 	USART_ITConfig(USART2, USART_IT_RXNE, ENABLE); // Receive Data register not empty interrupt
 	
 }
+
 void TIM_Configure(void)
 {
     
@@ -310,6 +308,7 @@ void TIM_Configure(void)
     TIM_ARRPreloadConfig(TIM3, ENABLE);
     TIM_Cmd(TIM3, ENABLE);
 }
+
 void NVIC_Configure(void) {
 
     NVIC_InitTypeDef NVIC_InitStructure;
@@ -370,7 +369,7 @@ void USART2_IRQHandler() { // phone -> putty
         // the most recent received data by the USART2 peripheral
         word = USART_ReceiveData(USART2);
         receive_num = word - '0';
-        if (receive_num <= 99999999 && receive_num >=1) {
+        if (receive_num <= 9 && receive_num >=1) {
           is_command = receive_num;
         }
         
@@ -408,7 +407,7 @@ void TIM2_IRQHandler(void) {
       if(lasor_activate){
         lasor_count++;
         if(lasor_count % 2 == 1) moveLasor(SERVO_MAX_ANGLE);
-        else moveLasor(SERVO_MIN_ANGLE);
+        else moveLasor(SERVO_MID_ANGLE);
         
         if(lasor_count >= 10){
           reset_laser();
@@ -419,11 +418,11 @@ void TIM2_IRQHandler(void) {
       TIM_ClearITPendingBit(TIM2, TIM_IT_Update);
     }
 }
+
 // 진동 센서 값을 읽고 블루투스로 전송
 void read_vibration_sensor(void) {
     uint32_t vibration_value = ADC_Value[0];  // 진동 센서의 값이 첫 번째 채널에 저장됨
   
-    
     if (vibration_value < VIBRATION_THRESHOLD) {
         char vibration_msg[50];
         sprintf(vibration_msg, "\r\nVibration Detected! ADC Value: %d\r\n", vibration_value);
@@ -449,14 +448,13 @@ void check_for_object(void)
 // 온습도 센서 값을 읽고 변환하여 출력
 void read_temperature_humidity(void) {
     // 가상의 코드로, 실제 온도/습도 센서에 맞게 수정 필요.
-    float temp = (ADC_Value[1] / ADC_MAX_VALUE) * 3.3 * 100;  // 온도 계산 (예: 간단한 ADC 변환)
-    float humidity = (ADC_Value[1] / ADC_MAX_VALUE) * 3.3 * 100;  // 습도 계산
+    float temp = ((ADC_Value[1] / ADC_MAX_VALUE) * 3.3 - 0.5)* 100 - 253;  // 온도 계산 (예: 간단한 ADC 변환)
+    float humidity = (ADC_Value[1] / ADC_MAX_VALUE) * 100 - 75;  // 습도 계산
     char buf[50];
     sprintf(buf, "\r\nTemperature: %.2f C, Humidity: %.2f %%\r\n", temp, humidity);
     send_msg_to_bluetooth(buf);
     send_msg_to_putty(buf);
 }
-
 
 // 레이저 켜는 함수
 void set_laser(void) {
@@ -477,8 +475,6 @@ void reset_laser(void) {
      send_msg_to_putty("\r\nLaser OFF\r\n");
      delay();
 }
-
-
 
 // 메뉴에서 레이저 제어 옵션 추가
 void process_menu_input(uint16_t input) {
@@ -526,6 +522,7 @@ void moveMotor(uint16_t pulse){
 
     TIM_OC3Init(TIM3, &TIM_OCInitStructure); 
 }
+
 void moveLasor(uint16_t pulse){
   // Adjust LasorAngle
     TIM_OCInitTypeDef TIM_OCInitStructure; 
@@ -543,9 +540,6 @@ void feed(){
   send_msg_to_putty("\r\nFeed\r\n");
   delay();
 }
-                              
-
-
 
 void delay() {
     for (int i=0; i<1000000; i++);
@@ -565,40 +559,36 @@ int main(void)
 
     ADC_Configure();
     DMA_Configure();
-    
-    uint16_t receive_data;
 
-   // moveServoToAngle(SERVO_MID_ANGLE);
     while (1) { 
-   
-      
 
-      if(GPIO_ReadInputDataBit(GPIOD, GPIO_Pin_2) != SET && !menu_printed){
+      if(GPIO_ReadInputDataBit(GPIOD, GPIO_Pin_4) != SET && !menu_printed){
         menu_printed = 1;
         send_msg_to_bluetooth(msg);
         is_command = 0;
         
         while(1){
-          if(is_command) {
+         if(is_command) {
             process_menu_input(is_command);
             delay();
             is_command = 0;
-        }
+          }
+          // 진동 센서 값 읽기
+           read_vibration_sensor();
+          
+          // 초음파 센서로 물체 감지
+          check_for_object();
+          
+          delay();
+    
          
-        }
+       }
         
-      }
-      
-      
-      
-      // 메뉴에서 사용자 입력 받기 (USART2에서 입력 받기)
+     }
+   
        
       
-     // 진동 센서 값 읽기
-    //  read_vibration_sensor();
-      
-      // 초음파 센서로 물체 감지
-     // check_for_object();
+   
       
 
       
